@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
-notion = "0.5.1"
+rusticnotion = { path = "vendor/rusticnotion" }
 poise = "0.6.1"
 rand = "0.8.5"
 reqwest = "0.12.5"
