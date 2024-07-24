@@ -20,6 +20,7 @@ use crate::models::users::{User, UserCommon};
 pub use chrono::{DateTime, Utc};
 pub use serde_json::value::Number;
 
+#[allow(dead_code)]
 #[derive(Serialize, Deserialize, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Copy, Clone)]
 #[serde(rename_all = "snake_case")]
 enum ObjectType {
