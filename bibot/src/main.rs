@@ -70,5 +70,6 @@ async fn main(#[shuttle_runtime::Secrets] secret_store: SecretStore) -> ShuttleS
         .framework(framework)
         .await
         .map_err(shuttle_runtime::CustomError::new)?;
+
     Ok(client.into())
 }
