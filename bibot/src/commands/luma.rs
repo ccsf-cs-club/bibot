@@ -1,99 +1,84 @@
-extern crate ical;
 use crate::{Context, Error};
 use anyhow::Result;
+use chrono::prelude::*;
+use serde::Deserialize;
 
-#[allow(unused_imports)]
-use ical::parser::{ical::component::IcalCalendar, Component};
+use chrono::TimeZone;
+use chrono_tz::US::Pacific;
 
-use std::cmp;
-
-fn format_date(dt: String) -> String {
-    format!("{}/{}:\n", dt.get(4..6).unwrap(), dt.get(6..8).unwrap())
+#[derive(Debug, Deserialize)]
+struct GeoAddressInfo {
+    city_state: String,
 }
 
-/// Reports on events in SF using Luma
+#[derive(Debug, Deserialize)]
+struct Event {
+    name: String,
+    url: String,
+    geo_address_info: GeoAddressInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct Calendar {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Entry {
+    event: Event,
+    calendar: Calendar,
+    start_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LumaEvents {
+    entries: Vec<Entry>,
+    has_more: bool,
+    next_cursor: String,
+}
+
 #[poise::command(slash_command)]
-pub async fn luma(ctx: Context<'_>, offset: usize, qty: usize) -> Result<(), Error> {
-    let body =
-        reqwest::get("https://api.lu.ma/ics/get?entity=discover&id=discplace-BDj7GNbGlsF7Cka")
-            .await?
-            .text()
-            .await?;
-
-    let reader = ical::IcalParser::new(body.as_bytes());
-    let mut msg = String::with_capacity(2000);
-    for line in reader {
-        if let Ok(cal) = line {
-            // Title
-            if offset > cal.events.len() {
-                ctx.say("No events").await?;
-                return Ok(());
+pub async fn luma(ctx: Context<'_>) -> Result<(), Error> {
+    // Ping the Luma public API for events
+    let body = reqwest::get("https://api.lu.ma/discover/get-paginated-events?discover_place_api_id=discplace-BDj7GNbGlsF7Cka&pagination_limit=50")
+        .await?
+        .text()
+        .await?;
+    let events: LumaEvents = serde_json::from_str(&body)?;
+    let mut message = String::from("Luma in SF: \n");
+    let mut weekday: Weekday = Weekday::Sun;
+    for entry in events.entries.into_iter() {
+        let event = &entry.event;
+        // let calendar = &entry.calendar;
+        if event.geo_address_info.city_state == "San Francisco, California" {
+            let dt = DateTime::parse_from_rfc3339(&entry.start_at.unwrap()).unwrap();
+            let pst = dt.with_timezone(&Pacific);
+            if pst.weekday() != weekday {
+                weekday = pst.weekday();
+                message += format!("{} ({}/{}):\n", weekday, pst.month(), pst.day()).as_str();
             }
-            let end = cmp::min(offset + qty, cal.events.len());
-            let title = cal
-                .get_property("X-WR-CALNAME")
-                .unwrap()
-                .value
-                .clone()
-                .unwrap();
-            msg.push_str(format!("{} - {}-{}\n", title, offset, end).as_str());
-
-            // Events
-            let mut dt = String::new();
-            for event in &cal.events[offset..end] {
-                let mut summary = event
-                    .get_property("SUMMARY")
-                    .unwrap()
-                    .value
-                    .clone()
-                    .unwrap();
-
-                // Sometimes the summary includes an @, use what comes before it
-                summary = summary.split("@").take(1).collect();
-                summary = summary.split(" - ").take(1).collect();
-                summary = summary.split(" | ").take(1).collect();
-
-                let time = event
-                    .get_property("DTSTART")
-                    .unwrap()
-                    .value
-                    .clone()
-                    .unwrap();
-
-                // If the date is a new one, display it
-                if dt != format_date(time.clone()) {
-                    dt = format_date(time.clone());
-                    msg.push_str(dt.as_str());
-                }
-
-                let mut location = event
-                    .get_property("LOCATION")
-                    .unwrap()
-                    .value
-                    .clone()
-                    .unwrap();
-                // Similarly, don't need anything after ', San Francisco,...'
-                if location.contains(", San Francisco") {
-                    location = location.split(", San Francisco").take(1).collect();
-                }
-                location = location.split(", ").take(1).collect();
-
-                if location.contains("http") {
-                    msg.push_str(format!("- [{}]({})\n", summary.trim(), location.trim()).as_str());
-                } else {
-                    msg.push_str(format!("- {} @ {}\n", summary.trim(), location.trim()).as_str());
-                }
-            }
+            message += format!(
+                "\t{}: [{}](https://lu.ma/{})\n",
+                pst.format("%l%p"),
+                &event.name,
+                &event.url
+            )
+            .as_str();
         }
     }
+    let mut chat_msg = String::from("");
+    let mut wc = 0;
+    for line in message.split("\n") {
+        chat_msg.push_str(line);
+        chat_msg.push('\n');
+        wc += line.len();
+        if wc >= 1500 {
+            ctx.say(&chat_msg).await?;
+            chat_msg = String::from("");
+            wc = 0;
+        }
+    }
+    // ctx.say(&chat_msg).await?;
 
-    ctx.say(msg).await?;
-    Ok(())
-}
-
-// Makes it partytime for 1 hour
-#[poise::command(slash_command)]
-async fn partytime(ctx: Context<'_>) -> Result<(), Error> {
-    ctx.say("/create title:dev_event datetime:in 5 seconds description:test dev event duration:15 seconds channel:#bot-spam").await?;
     Ok(())
 }

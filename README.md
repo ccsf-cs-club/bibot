@@ -1,4 +1,13 @@
-# bibot
-Web API for eventual Discord chatbot
+# Bibot
+CCSF Computer Science Club's own Discord Chatbot!
 
-https://python.langchain.com/v0.2/docs/langserve/
+
+
+## Structure
+```
+.
+├── Cargo.toml        // Rust workspace configuration
+├── README.md         // You are here
+├── bibot             // serves messages to Discord
+└── db                // handles querying database
+```
