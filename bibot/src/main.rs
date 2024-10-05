@@ -1,10 +1,11 @@
-use anyhow::Context as _;
 use anyhow::Result;
 use poise::serenity_prelude as serenity;
 
 mod commands;
 
-struct Data {} // User data, which is stored and accessible in all command invocations
+struct Data {
+    openai_key: String,
+} // User data, which is stored and accessible in all command invocations
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
 
@@ -25,6 +26,11 @@ async fn main() -> Result<()> {
     dotenvy::dotenv()?;
 
     let token = std::env::var("DISCORD_TOKEN").expect("missing DISCORD_TOKEN");
+    let openai_api_key = std::env::var("OPENAI_API_KEY").expect("missing OPENAI_API_KEY");
+
+    let turso_url = std::env::var("TURSO_DATABASE_URL").expect("TURSO_DATABASE_URL must be set");
+    let turso_token = std::env::var("TURSO_AUTH_TOKEN").unwrap_or_default();
+
     let intents = serenity::GatewayIntents::non_privileged();
 
     let framework = poise::Framework::builder()
@@ -34,14 +40,17 @@ async fn main() -> Result<()> {
                 commands::version::version(),
                 commands::dice::dice(),
                 commands::iss::iss(),
-                commands::luma::luma(),
+                // commands::luma::luma(),
+                commands::bibot::bibot(),
             ],
             ..Default::default()
         })
         .setup(|ctx, _ready, framework| {
             Box::pin(async move {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
-                Ok(Data {})
+                Ok(Data {
+                    openai_key: openai_api_key,
+                })
             })
         })
         .build();
