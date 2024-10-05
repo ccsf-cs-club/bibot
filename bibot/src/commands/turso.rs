@@ -17,6 +17,14 @@ struct Reports {
 
 #[poise::command(slash_command)]
 pub async fn iss(ctx: Context<'_>) -> Result<(), Error> {
+    use libsql::Builder;
+
+    let mut db = Builder::new_remote_replica("local.db", &url, &token)
+        .build()
+        .await
+        .unwrap();
+    let conn = db.connect().unwrap();
+
     let body = reqwest::get("https://api.spaceflightnewsapi.net/v4/reports/?format=json&limit=1")
         .await?
         .text()

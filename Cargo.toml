@@ -1,0 +1,6 @@
+[workspace]
+
+members = [
+    "bibot", "db",
+]
+resolver = "2"

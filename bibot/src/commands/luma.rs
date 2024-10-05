@@ -1,99 +1,214 @@
-extern crate ical;
 use crate::{Context, Error};
 use anyhow::Result;
+use chrono::prelude::*;
+use scraper::{Html, Selector};
+use serde::Deserialize;
+use std::fmt::Debug;
 
-#[allow(unused_imports)]
-use ical::parser::{ical::component::IcalCalendar, Component};
+use langchain_rust::{
+    chain::Chain,
+    language_models::llm::LLM,
+    llm::openai::{OpenAI, OpenAIConfig, OpenAIModel},
+};
 
-use std::cmp;
+use chrono_tz::US::Pacific;
 
-fn format_date(dt: String) -> String {
-    format!("{}/{}:\n", dt.get(4..6).unwrap(), dt.get(6..8).unwrap())
+#[derive(Debug, Deserialize)]
+struct GeoAddressInfo {
+    city_state: String,
 }
 
-/// Reports on events in SF using Luma
-#[poise::command(slash_command)]
-pub async fn luma(ctx: Context<'_>, offset: usize, qty: usize) -> Result<(), Error> {
-    let body =
-        reqwest::get("https://api.lu.ma/ics/get?entity=discover&id=discplace-BDj7GNbGlsF7Cka")
-            .await?
-            .text()
-            .await?;
+#[derive(Debug, Deserialize)]
+struct Event {
+    name: String,
+    url: String,
+    geo_address_info: GeoAddressInfo,
+}
 
-    let reader = ical::IcalParser::new(body.as_bytes());
-    let mut msg = String::with_capacity(2000);
-    for line in reader {
-        if let Ok(cal) = line {
-            // Title
-            if offset > cal.events.len() {
-                ctx.say("No events").await?;
-                return Ok(());
+#[derive(Debug, Deserialize)]
+struct Calendar {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct Entry {
+    event: Event,
+    calendar: Calendar,
+    start_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LumaEvents {
+    entries: Vec<Entry>,
+    has_more: bool,
+    next_cursor: String,
+}
+
+// #[poise::command(slash_command)]
+pub async fn luma(ctx: Context<'_>) -> Result<(), Error> {
+    // Ping the Luma public API for events
+    let openai_key = &ctx.data().openai_key;
+    let body = reqwest::get("https://api.lu.ma/discover/get-paginated-events?discover_place_api_id=discplace-BDj7GNbGlsF7Cka&pagination_limit=50")
+        .await?
+        .text()
+        .await?;
+    let events: LumaEvents = serde_json::from_str(&body)?;
+    let mut message = String::from("Luma in SF: \n");
+    let mut weekday: Weekday = Weekday::Sun;
+    for entry in events.entries.into_iter() {
+        let event = &entry.event;
+        // let calendar = &entry.calendar;
+        if event.geo_address_info.city_state == "San Francisco, California" {
+            let dt = DateTime::parse_from_rfc3339(&entry.start_at.unwrap()).unwrap();
+            let pst = dt.with_timezone(&Pacific);
+            if pst.weekday() != weekday {
+                weekday = pst.weekday();
+                message += format!("{} ({}/{}):\n", weekday, pst.month(), pst.day()).as_str();
             }
-            let end = cmp::min(offset + qty, cal.events.len());
-            let title = cal
-                .get_property("X-WR-CALNAME")
-                .unwrap()
-                .value
-                .clone()
-                .unwrap();
-            msg.push_str(format!("{} - {}-{}\n", title, offset, end).as_str());
+            message += format!(
+                "\t{}: [{}](https://lu.ma/{})\n",
+                pst.format("%l%p"),
+                &event.name,
+                &event.url
+            )
+            .as_str();
+            let url = format!("https://lu.ma/{}", &event.url);
 
-            // Events
-            let mut dt = String::new();
-            for event in &cal.events[offset..end] {
-                let mut summary = event
-                    .get_property("SUMMARY")
-                    .unwrap()
-                    .value
-                    .clone()
-                    .unwrap();
+            let html = reqwest::get(url).await?.text().await?;
+            let document = Html::parse_document(&html);
+            let selector = Selector::parse(".event-about-card").unwrap();
 
-                // Sometimes the summary includes an @, use what comes before it
-                summary = summary.split("@").take(1).collect();
-                summary = summary.split(" - ").take(1).collect();
-                summary = summary.split(" | ").take(1).collect();
+            let event_info = document.select(&selector).next().unwrap();
+            let text = event_info.text().collect::<Vec<_>>().join("\n");
+            let open_ai = OpenAI::default()
+                .with_config(OpenAIConfig::default().with_api_key(openai_key))
+                .with_model(OpenAIModel::Gpt4oMini.to_string());
 
-                let time = event
-                    .get_property("DTSTART")
-                    .unwrap()
-                    .value
-                    .clone()
-                    .unwrap();
+            let prompt = format!("You are a starving college student named Smallnumbers. Your mission in life is to help identify free food at tech events. You will be given event descriptions, and your job is to determine whether or not food is likely to be served. If there is food, mention what type it'll be. Give the reasoning in a 'comment' blurb inside the object you'll return.
+        --------
+            Event: 
+            Join us for the Dreamforce After Party! Dive into the world of Generative AI with an exclusive gathering that combines delicious sushi, themed beverages, and stimulating conversations on the transformative impact of AI technologies on corporations. This event will feature engaging discussions with industry leaders from AWS and Observea providing unique insights into the latest tools and technologies shaping the future of AI.
 
-                // If the date is a new one, display it
-                if dt != format_date(time.clone()) {
-                    dt = format_date(time.clone());
-                    msg.push_str(dt.as_str());
-                }
+            Agenda
 
-                let mut location = event
-                    .get_property("LOCATION")
-                    .unwrap()
-                    .value
-                    .clone()
-                    .unwrap();
-                // Similarly, don't need anything after ', San Francisco,...'
-                if location.contains(", San Francisco") {
-                    location = location.split(", San Francisco").take(1).collect();
-                }
-                location = location.split(", ").take(1).collect();
+            5:00 Doors Open & Networking
 
-                if location.contains("http") {
-                    msg.push_str(format!("- [{}]({})\n", summary.trim(), location.trim()).as_str());
-                } else {
-                    msg.push_str(format!("- {} @ {}\n", summary.trim(), location.trim()).as_str());
-                }
-            }
+            6:00 Welcoming Remarks
+
+            6:15 Short Demo/Panel Discussions
+
+            Panel Conversation: How GenAI will change how we work
+
+            Panelists: Shannon Brownlee (Valence Vibrations), Vamsi Pandari/Chris Leggett (Observea), Shaun VanWeelden (ex ScaleAI, OpenAI)
+
+            Lightning Presenters:
+
+            Observea (Vamsi Pandari)
+
+            Open Babylon (Yurii Filipchuk)
+
+            SylphAI & AdalFlow Demo (Li Yin)
+
+            6:30 Dinner & Drinks
+
+            9:00 Event Ends
+
+            10:00 Doors Close
+
+            Space
+
+            Step into the enchanting Roka Akor in San Francisco for the Dreamforce Gen AI After-Party, hosted by Observea and AWS. This exclusive venue combines modern sophistication with a warm, inviting atmosphere, making it a prime location for networking and insightful discussions on AI integration. Located in the historic Jackson Square, Roka Akor offers a stunning backdrop with its contemporary, chef-driven menu featuring prime steak, sushi, and seafood—all prepared on a signature robata grill.
+
+            Throughout the evening, enjoy a selection of exquisite dinner and bite-sized treats provided by your hosts, Observea and AWS, ensuring a delightful culinary experience.
+
+            This is your chance to network with the best in the industry and discuss future AI innovations. Spots are limited and exclusive to approved attendees—no +1s. If you were not pre-approved, unfortunately, you will not be admitted to the event.
+        --------
+            Answer: {{'has_food': true, 'food_type': 'steak, sushi, seafood', 'contributions_required': false, 'name': 'Dreamforce Gen AI After-Party', 'comment': 'Sushi, beverages, and steaks/seafood at Roka Akor in San Francisco mentioned explicitly.'}}
+        --------
+            Event:
+
+            {}
+        --------
+            Answer: {{'has_free_food': ", text);
+            let resp = open_ai.invoke(prompt.as_str());
+            message += format!("{{'has_food': {}", resp.await.unwrap()).as_str();
         }
     }
+    let mut chat_msg = String::from("");
+    let mut wc = 0;
+    for line in message.split("\n") {
+        chat_msg.push_str(line);
+        chat_msg.push('\n');
+        wc += line.len();
+        if wc >= 1500 {
+            ctx.say(&chat_msg).await?;
+            chat_msg = String::from("");
+            wc = 0;
+        }
+    }
+    ctx.say(&chat_msg).await?;
 
-    ctx.say(msg).await?;
     Ok(())
 }
 
-// Makes it partytime for 1 hour
-#[poise::command(slash_command)]
-async fn partytime(ctx: Context<'_>) -> Result<(), Error> {
-    ctx.say("/create title:dev_event datetime:in 5 seconds description:test dev event duration:15 seconds channel:#bot-spam").await?;
-    Ok(())
+async fn food_report(url: &str, openai_api_key: &str) -> Result<String> {
+    let html = reqwest::get(url).await?.text().await?;
+    let document = Html::parse_document(&html);
+    let selector = Selector::parse(".event-about-card").unwrap();
+
+    let event_info = document.select(&selector).next().unwrap();
+    let text = event_info.text().collect::<Vec<_>>().join("\n");
+    let open_ai = OpenAI::default()
+        .with_config(OpenAIConfig::default().with_api_key(openai_api_key))
+        .with_model(OpenAIModel::Gpt4oMini.to_string());
+
+    let prompt = format!("You are a starving college student named Smallnumbers. Your mission in life is to help identify free food at tech events. You will be given event descriptions, and your job is to determine whether or not food is likely to be served. If there is food, mention what type it'll be. Give the reasoning in a 'comment' blurb inside the object you'll return.
+--------
+    Event: 
+    Join us for the Dreamforce After Party! Dive into the world of Generative AI with an exclusive gathering that combines delicious sushi, themed beverages, and stimulating conversations on the transformative impact of AI technologies on corporations. This event will feature engaging discussions with industry leaders from AWS and Observea providing unique insights into the latest tools and technologies shaping the future of AI.
+
+    Agenda
+
+    5:00 Doors Open & Networking
+
+    6:00 Welcoming Remarks
+
+    6:15 Short Demo/Panel Discussions
+
+    Panel Conversation: How GenAI will change how we work
+
+    Panelists: Shannon Brownlee (Valence Vibrations), Vamsi Pandari/Chris Leggett (Observea), Shaun VanWeelden (ex ScaleAI, OpenAI)
+
+    Lightning Presenters:
+
+    Observea (Vamsi Pandari)
+
+    Open Babylon (Yurii Filipchuk)
+
+    SylphAI & AdalFlow Demo (Li Yin)
+
+    6:30 Dinner & Drinks
+
+    9:00 Event Ends
+
+    10:00 Doors Close
+
+    Space
+
+    Step into the enchanting Roka Akor in San Francisco for the Dreamforce Gen AI After-Party, hosted by Observea and AWS. This exclusive venue combines modern sophistication with a warm, inviting atmosphere, making it a prime location for networking and insightful discussions on AI integration. Located in the historic Jackson Square, Roka Akor offers a stunning backdrop with its contemporary, chef-driven menu featuring prime steak, sushi, and seafood—all prepared on a signature robata grill.
+
+    Throughout the evening, enjoy a selection of exquisite dinner and bite-sized treats provided by your hosts, Observea and AWS, ensuring a delightful culinary experience.
+
+    This is your chance to network with the best in the industry and discuss future AI innovations. Spots are limited and exclusive to approved attendees—no +1s. If you were not pre-approved, unfortunately, you will not be admitted to the event.
+--------
+    Answer: {{'has_food': true, 'food_type': 'steak, sushi, seafood', 'contributions_required': false, 'name': 'Dreamforce Gen AI After-Party', 'comment': 'Sushi, beverages, and steaks/seafood at Roka Akor in San Francisco mentioned explicitly.'}}
+--------
+    Event:
+
+    {}
+--------
+    Answer: {{'has_free_food': ", text);
+    let resp = open_ai.invoke(prompt.as_str()).await.unwrap();
+    println!("{{'has_food': {}", resp);
+    Ok(String::from(url))
 }

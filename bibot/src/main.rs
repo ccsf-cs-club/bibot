@@ -1,57 +1,47 @@
-use anyhow::Context as _;
 use anyhow::Result;
-use poise::serenity_prelude::{ClientBuilder, GatewayIntents};
-use shuttle_runtime::SecretStore;
-use shuttle_serenity::ShuttleSerenity;
+use poise::serenity_prelude as serenity;
 
 mod commands;
 
 struct Data {
-    notion_api_key: String,
-    accuweather_api_key: String,
+    openai_key: String,
 } // User data, which is stored and accessible in all command invocations
 type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, Data, Error>;
 
-/// Responds with a greeting
-#[poise::command(slash_command)]
-async fn hello(ctx: Context<'_>) -> Result<(), Error> {
-    ctx.say(", CCSF CS Club!").await?;
+/// Displays your or another user's account creation date
+#[poise::command(slash_command, prefix_command)]
+async fn age(
+    ctx: Context<'_>,
+    #[description = "Selected user"] user: Option<serenity::User>,
+) -> Result<(), Error> {
+    let u = user.as_ref().unwrap_or_else(|| ctx.author());
+    let response = format!("{}'s account was created at {}", u.name, u.created_at());
+    ctx.say(response).await?;
     Ok(())
 }
 
-// Makes it partytime for 1 hour
-#[poise::command(slash_command)]
-async fn partytime(ctx: Context<'_>) -> Result<(), Error> {
-    ctx.say("/create title:dev_event datetime:in 5 seconds description:test dev event duration:15 seconds channel:#bot-spam").await?;
-    Ok(())
-}
+#[tokio::main]
+async fn main() -> Result<()> {
+    dotenvy::dotenv()?;
 
-#[shuttle_runtime::main]
-async fn main(#[shuttle_runtime::Secrets] secret_store: SecretStore) -> ShuttleSerenity {
-    // Get the discord token set in `Secrets.toml`
-    let discord_token = secret_store
-        .get("DISCORD_TOKEN")
-        .context("'DISCORD_TOKEN' was not found")?;
-    let notion_token = secret_store
-        .get("NOTION_API_KEY")
-        .context("'NOTION_API_KEY' was not found");
-    let accuweather_api_key = secret_store
-        .get("ACCUWEATHER_API_KEY")
-        .context("'ACCUWEATHER_API_KEY' was not found");
+    let token = std::env::var("DISCORD_TOKEN").expect("missing DISCORD_TOKEN");
+    let openai_api_key = std::env::var("OPENAI_API_KEY").expect("missing OPENAI_API_KEY");
+
+    let turso_url = std::env::var("TURSO_DATABASE_URL").expect("TURSO_DATABASE_URL must be set");
+    let turso_token = std::env::var("TURSO_AUTH_TOKEN").unwrap_or_default();
+
+    let intents = serenity::GatewayIntents::non_privileged();
 
     let framework = poise::Framework::builder()
         .options(poise::FrameworkOptions {
+            // List the chat commands
             commands: vec![
-                hello(),
+                commands::version::version(),
                 commands::dice::dice(),
                 commands::iss::iss(),
-                commands::luma::luma(),
-                commands::notion::notion(),
-                commands::version::version(),
-                commands::weather::weather(),
-                commands::linkedin::linkedin(),
-                partytime(),
+                // commands::luma::luma(),
+                commands::bibot::bibot(),
             ],
             ..Default::default()
         })
@@ -59,16 +49,15 @@ async fn main(#[shuttle_runtime::Secrets] secret_store: SecretStore) -> ShuttleS
             Box::pin(async move {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 Ok(Data {
-                    notion_api_key: notion_token.unwrap(),
-                    accuweather_api_key: accuweather_api_key.unwrap(),
+                    openai_key: openai_api_key,
                 })
             })
         })
         .build();
 
-    let client = ClientBuilder::new(discord_token, GatewayIntents::non_privileged())
+    let client = serenity::ClientBuilder::new(token, intents)
         .framework(framework)
-        .await
-        .map_err(shuttle_runtime::CustomError::new)?;
-    Ok(client.into())
+        .await;
+    client.unwrap().start().await.unwrap();
+    Ok(())
 }
